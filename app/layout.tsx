@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import React from 'react'
+import './globals.css'
 
 export const metadata: Metadata = {
   title: 'Референт',
@@ -13,7 +14,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="ru">
-      <body>{children}</body>
+      <body className="antialiased">{children}</body>
     </html>
   )
 }
