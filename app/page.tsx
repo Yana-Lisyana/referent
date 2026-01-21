@@ -18,12 +18,31 @@ export default function Home() {
     setActiveAction(action)
     setResult('')
 
-    // Здесь будет логика подключения к AI и выполнения действия
-    // Пока просто имитация загрузки
-    setTimeout(() => {
-      setResult(`Результат для действия "${action}" будет здесь...`)
+    try {
+      // Вызываем API для парсинга статьи
+      const response = await fetch('/api/parse', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ url }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || 'Ошибка при парсинге статьи')
+      }
+
+      const data = await response.json()
+      
+      // Форматируем JSON для красивого вывода
+      const formattedResult = JSON.stringify(data, null, 2)
+      setResult(formattedResult)
+    } catch (error: any) {
+      setResult(`Ошибка: ${error.message}`)
+    } finally {
       setLoading(false)
-    }, 1000)
+    }
   }
 
   return (
