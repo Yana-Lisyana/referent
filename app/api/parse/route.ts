@@ -7,6 +7,116 @@ export const maxDuration = 30 // Максимальное время выпол�
 
 // Увеличиваем таймаут для Vercel (максимум 60 секунд для serverless функций)
 const FETCH_TIMEOUT = 30000 // 30 секунд
+const MAX_RETRIES = 3 // Максимальное количество попыток
+const RETRY_DELAY_BASE = 1000 // Базовая задержка для ретраев (1 секунда)
+
+// Список реалистичных User-Agents для ротации
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+]
+
+// Функция для получения случайного User-Agent
+function getRandomUserAgent(): string {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]
+}
+
+// Функция для создания реалистичных заголовков
+function createHeaders(targetUrl: URL, attempt: number = 0): HeadersInit {
+  const userAgent = getRandomUserAgent()
+  const referer = attempt > 0 
+    ? `https://www.google.com/` // Используем Google как referer при ретраях
+    : targetUrl.origin
+
+  return {
+    'User-Agent': userAgent,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br, zstd',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': attempt > 0 ? 'cross-site' : 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0',
+    'Referer': referer,
+    'Origin': targetUrl.origin,
+    'Viewport-Width': '1920',
+    'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"'
+  }
+}
+
+// Функция для задержки
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+// Функция для выполнения fetch с ретраями
+async function fetchWithRetry(
+  url: string,
+  targetUrl: URL,
+  maxRetries: number = MAX_RETRIES
+): Promise<Response> {
+  let lastError: any = null
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    let timeoutId: NodeJS.Timeout | null = null
+    try {
+      const controller = new AbortController()
+      timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT)
+      
+      const response = await fetch(url, {
+        headers: createHeaders(targetUrl, attempt),
+        redirect: 'follow',
+        signal: controller.signal
+      })
+      
+      if (timeoutId) clearTimeout(timeoutId)
+      
+      // Если получили успешный ответ, возвращаем его
+      if (response.ok) {
+        return response
+      }
+      
+      // Если получили 403 и это не последняя попытка, делаем ретрай
+      if (response.status === 403 && attempt < maxRetries) {
+        const delayMs = RETRY_DELAY_BASE * Math.pow(2, attempt) + Math.random() * 500 // Экспоненциальная задержка с небольшим рандомом
+        console.log(`403 ошибка, попытка ${attempt + 1}/${maxRetries + 1}, повтор через ${Math.round(delayMs)}мс`)
+        await delay(delayMs)
+        lastError = response
+        continue
+      }
+      
+      // Для других ошибок возвращаем ответ сразу
+      return response
+      
+    } catch (error: any) {
+      if (timeoutId) clearTimeout(timeoutId)
+      
+      // Если это таймаут и не последняя попытка, делаем ретрай
+      if (error.name === 'AbortError' && attempt < maxRetries) {
+        const delayMs = RETRY_DELAY_BASE * Math.pow(2, attempt)
+        console.log(`Таймаут, попытка ${attempt + 1}/${maxRetries + 1}, повтор через ${Math.round(delayMs)}мс`)
+        await delay(delayMs)
+        lastError = error
+        continue
+      }
+      
+      // Для других ошибок или последней попытки выбрасываем ошибку
+      throw error
+    }
+  }
+  
+  // Если все попытки исчерпаны, выбрасываем последнюю ошибку
+  throw lastError || new Error('Все попытки исчерпаны')
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -38,41 +148,18 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Получаем HTML страницы с улучшенными заголовками
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT)
-
+    // Получаем HTML страницы с ретраями и улучшенными заголовками
     try {
-      const response = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Accept-Encoding': 'gzip, deflate, br, zstd',
-          'DNT': '1',
-          'Connection': 'keep-alive',
-          'Upgrade-Insecure-Requests': '1',
-          'Sec-Fetch-Dest': 'document',
-          'Sec-Fetch-Mode': 'navigate',
-          'Sec-Fetch-Site': 'none',
-          'Sec-Fetch-User': '?1',
-          'Cache-Control': 'max-age=0',
-          'Referer': targetUrl.origin,
-          'Origin': targetUrl.origin
-        },
-        redirect: 'follow',
-        signal: controller.signal
-      })
-      
-      clearTimeout(timeoutId)
+      const response = await fetchWithRetry(url, targetUrl)
 
       if (!response.ok) {
         // Более детальная обработка ошибок
         if (response.status === 403) {
           return NextResponse.json(
             { 
-              error: 'Доступ запрещен (403). Сайт может блокировать автоматические запросы. Попробуйте другой URL или проверьте доступность сайта.',
-              statusCode: 403
+              error: 'Доступ запрещен (403). Сайт блокирует автоматические запросы даже после нескольких попыток. Попробуйте другой URL.',
+              statusCode: 403,
+              suggestion: 'Некоторые сайты имеют строгую защиту от ботов. Попробуйте использовать другой источник статьи.'
             },
             { status: 403 }
           )
@@ -84,6 +171,15 @@ export async function POST(request: NextRequest) {
               statusCode: 404
             },
             { status: 404 }
+          )
+        }
+        if (response.status === 429) {
+          return NextResponse.json(
+            { 
+              error: 'Слишком много запросов (429). Сайт временно ограничил доступ. Попробуйте позже.',
+              statusCode: 429
+            },
+            { status: 429 }
           )
         }
         return NextResponse.json(
@@ -221,20 +317,31 @@ export async function POST(request: NextRequest) {
     })
 
     } catch (fetchError: any) {
-      clearTimeout(timeoutId)
-      
       if (fetchError.name === 'AbortError') {
         return NextResponse.json(
-          { error: 'Превышено время ожидания ответа от сервера (таймаут)' },
+          { error: 'Превышено время ожидания ответа от сервера (таймаут). Попробуйте еще раз.' },
           { status: 504 }
         )
       }
       
-      if (fetchError.message?.includes('fetch failed')) {
+      if (fetchError.message?.includes('fetch failed') || fetchError.message?.includes('ECONNREFUSED')) {
         return NextResponse.json(
           { error: 'Не удалось подключиться к серверу. Проверьте правильность URL и доступность сайта.' },
           { status: 503 }
         )
+      }
+      
+      // Если это Response объект (403 после всех попыток)
+      if (fetchError instanceof Response) {
+        if (fetchError.status === 403) {
+          return NextResponse.json(
+            { 
+              error: 'Доступ запрещен (403). Сайт блокирует автоматические запросы. Попробуйте другой URL.',
+              statusCode: 403
+            },
+            { status: 403 }
+          )
+        }
       }
       
       throw fetchError
