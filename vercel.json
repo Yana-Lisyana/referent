@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "app/api/parse/route.ts": {
+      "maxDuration": 30
+    }
+  }
+}

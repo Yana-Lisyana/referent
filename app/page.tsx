@@ -19,18 +19,24 @@ export default function Home() {
     setResult('')
 
     try {
-      // Вызываем API для парсинга статьи
+      // Вызываем API для парсинга статьи с таймаутом
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 60000) // 60 секунд
+
       const response = await fetch('/api/parse', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ url }),
+        signal: controller.signal
       })
 
+      clearTimeout(timeoutId)
+
       if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.error || 'Ошибка при парсинге статьи')
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.error || `Ошибка ${response.status}: ${response.statusText}`)
       }
 
       const data = await response.json()
@@ -39,7 +45,17 @@ export default function Home() {
       const formattedResult = JSON.stringify(data, null, 2)
       setResult(formattedResult)
     } catch (error: any) {
-      setResult(`Ошибка: ${error.message}`)
+      let errorMessage = 'Произошла ошибка'
+      
+      if (error.name === 'AbortError') {
+        errorMessage = 'Превышено время ожидания. Попробуйте еще раз или используйте другой URL.'
+      } else if (error.message) {
+        errorMessage = error.message
+      } else if (error instanceof TypeError && error.message.includes('fetch')) {
+        errorMessage = 'Не удалось подключиться к серверу. Проверьте подключение к интернету.'
+      }
+      
+      setResult(`❌ Ошибка: ${errorMessage}`)
     } finally {
       setLoading(false)
     }

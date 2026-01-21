@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import * as cheerio from 'cheerio'
 
+// Используем Node.js runtime для cheerio (не Edge)
+export const runtime = 'nodejs'
+export const maxDuration = 30 // Максимальное время выполнения для Vercel (секунды)
+
+// Увеличиваем таймаут для Vercel (максимум 60 секунд для serverless функций)
+const FETCH_TIMEOUT = 30000 // 30 секунд
+
 export async function POST(request: NextRequest) {
   try {
     const { url } = await request.json()
@@ -12,33 +19,92 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Получаем HTML страницы
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Cache-Control': 'max-age=0'
-      },
-      redirect: 'follow'
-    })
-
-    if (!response.ok) {
+    // Валидация URL
+    let targetUrl: URL
+    try {
+      targetUrl = new URL(url)
+    } catch {
       return NextResponse.json(
-        { error: `Failed to fetch URL: ${response.statusText}` },
-        { status: response.status }
+        { error: 'Invalid URL format' },
+        { status: 400 }
       )
     }
 
-    const html = await response.text()
-    const $ = cheerio.load(html)
+    // Проверяем, что это HTTP/HTTPS
+    if (!['http:', 'https:'].includes(targetUrl.protocol)) {
+      return NextResponse.json(
+        { error: 'Only HTTP and HTTPS URLs are supported' },
+        { status: 400 }
+      )
+    }
+
+    // Получаем HTML страницы с улучшенными заголовками
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT)
+
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Accept-Encoding': 'gzip, deflate, br, zstd',
+          'DNT': '1',
+          'Connection': 'keep-alive',
+          'Upgrade-Insecure-Requests': '1',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+          'Cache-Control': 'max-age=0',
+          'Referer': targetUrl.origin,
+          'Origin': targetUrl.origin
+        },
+        redirect: 'follow',
+        signal: controller.signal
+      })
+      
+      clearTimeout(timeoutId)
+
+      if (!response.ok) {
+        // Более детальная обработка ошибок
+        if (response.status === 403) {
+          return NextResponse.json(
+            { 
+              error: 'Доступ запрещен (403). Сайт может блокировать автоматические запросы. Попробуйте другой URL или проверьте доступность сайта.',
+              statusCode: 403
+            },
+            { status: 403 }
+          )
+        }
+        if (response.status === 404) {
+          return NextResponse.json(
+            { 
+              error: 'Страница не найдена (404)',
+              statusCode: 404
+            },
+            { status: 404 }
+          )
+        }
+        return NextResponse.json(
+          { 
+            error: `Ошибка при получении страницы: ${response.status} ${response.statusText}`,
+            statusCode: response.status
+          },
+          { status: response.status }
+        )
+      }
+
+      const html = await response.text()
+      
+      if (!html || html.length === 0) {
+        return NextResponse.json(
+          { error: 'Получена пустая страница' },
+          { status: 500 }
+        )
+      }
+
+      const $ = cheerio.load(html)
 
     // Поиск заголовка статьи
     let title = ''
@@ -154,10 +220,41 @@ export async function POST(request: NextRequest) {
       content: content || 'Контент не найден'
     })
 
+    } catch (fetchError: any) {
+      clearTimeout(timeoutId)
+      
+      if (fetchError.name === 'AbortError') {
+        return NextResponse.json(
+          { error: 'Превышено время ожидания ответа от сервера (таймаут)' },
+          { status: 504 }
+        )
+      }
+      
+      if (fetchError.message?.includes('fetch failed')) {
+        return NextResponse.json(
+          { error: 'Не удалось подключиться к серверу. Проверьте правильность URL и доступность сайта.' },
+          { status: 503 }
+        )
+      }
+      
+      throw fetchError
+    }
   } catch (error: any) {
     console.error('Parse error:', error)
+    
+    // Более информативные сообщения об ошибках
+    if (error.message?.includes('Invalid URL')) {
+      return NextResponse.json(
+        { error: 'Некорректный формат URL' },
+        { status: 400 }
+      )
+    }
+    
     return NextResponse.json(
-      { error: error.message || 'Failed to parse article' },
+      { 
+        error: error.message || 'Ошибка при парсинге статьи',
+        details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      },
       { status: 500 }
     )
   }
