@@ -118,43 +118,56 @@ async function fetchWithRetry(
   throw lastError || new Error('Все попытки исчерпаны')
 }
 
+const log = (step: string, data?: unknown) => {
+  console.log(`[parse] ${step}`, data !== undefined ? data : '')
+}
+
 export async function POST(request: NextRequest) {
+  log('POST:start')
+
   try {
-    const { url } = await request.json()
+    log('request.json:before')
+    const body = await request.json()
+    const url = body?.url
+    log('request.json:after', { url: typeof url === 'string' ? url : '(not string)' })
 
     if (!url || typeof url !== 'string') {
+      log('validate:fail', { reason: 'URL missing or not string' })
       return NextResponse.json(
         { error: 'URL is required' },
         { status: 400 }
       )
     }
 
-    // Валидация URL
     let targetUrl: URL
     try {
       targetUrl = new URL(url)
-    } catch {
+      log('validate:url', { href: targetUrl.href, protocol: targetUrl.protocol })
+    } catch (e) {
+      log('validate:fail', { reason: 'Invalid URL format', err: String(e) })
       return NextResponse.json(
         { error: 'Invalid URL format' },
         { status: 400 }
       )
     }
 
-    // Проверяем, что это HTTP/HTTPS
     if (!['http:', 'https:'].includes(targetUrl.protocol)) {
+      log('validate:fail', { reason: 'Protocol not http(s)' })
       return NextResponse.json(
         { error: 'Only HTTP and HTTPS URLs are supported' },
         { status: 400 }
       )
     }
 
-    // Получаем HTML страницы с ретраями и улучшенными заголовками
     try {
+      log('fetchWithRetry:before', { url })
       const response = await fetchWithRetry(url, targetUrl)
+      log('fetchWithRetry:after', { status: response.status, ok: response.ok })
 
       if (!response.ok) {
-        // Более детальная обработка ошибок
+        log('fetch:notOk', { status: response.status, statusText: response.statusText })
         if (response.status === 403) {
+          log('fetch:return403')
           return NextResponse.json(
             { 
               error: 'Доступ запрещен (403). Сайт блокирует автоматические запросы даже после нескольких попыток. Попробуйте другой URL.',
@@ -165,6 +178,7 @@ export async function POST(request: NextRequest) {
           )
         }
         if (response.status === 404) {
+          log('fetch:return404')
           return NextResponse.json(
             { 
               error: 'Страница не найдена (404)',
@@ -174,6 +188,7 @@ export async function POST(request: NextRequest) {
           )
         }
         if (response.status === 429) {
+          log('fetch:return429')
           return NextResponse.json(
             { 
               error: 'Слишком много запросов (429). Сайт временно ограничил доступ. Попробуйте позже.',
@@ -182,6 +197,7 @@ export async function POST(request: NextRequest) {
             { status: 429 }
           )
         }
+        log('fetch:returnOther', { status: response.status })
         return NextResponse.json(
           { 
             error: `Ошибка при получении страницы: ${response.status} ${response.statusText}`,
@@ -191,16 +207,21 @@ export async function POST(request: NextRequest) {
         )
       }
 
+      log('response.text:before')
       const html = await response.text()
-      
+      log('response.text:after', { htmlLength: html?.length ?? 0 })
+
       if (!html || html.length === 0) {
+        log('error', { reason: 'Empty HTML' })
         return NextResponse.json(
           { error: 'Получена пустая страница' },
           { status: 500 }
         )
       }
 
+      log('cheerio.load:before')
       const $ = cheerio.load(html)
+      log('cheerio.load:after')
 
     // Поиск заголовка статьи
     let title = ''
@@ -307,9 +328,9 @@ export async function POST(request: NextRequest) {
       content = body.text().trim()
     }
 
-    // Очистка контента от лишних пробелов и переносов строк
     content = content.replace(/\s+/g, ' ').trim()
 
+    log('success', { titleLen: title.length, contentLen: content.length, dateLen: date.length })
     return NextResponse.json({
       date: date || 'Не найдена',
       title: title || 'Не найден',
@@ -317,6 +338,12 @@ export async function POST(request: NextRequest) {
     })
 
     } catch (fetchError: any) {
+      console.error('[parse] fetchError', {
+        name: fetchError?.name,
+        message: fetchError?.message,
+        isResponse: fetchError instanceof Response,
+        status: fetchError?.status,
+      })
       if (fetchError.name === 'AbortError') {
         return NextResponse.json(
           { error: 'Превышено время ожидания ответа от сервера (таймаут). Попробуйте еще раз.' },
@@ -347,9 +374,11 @@ export async function POST(request: NextRequest) {
       throw fetchError
     }
   } catch (error: any) {
-    console.error('Parse error:', error)
-    
-    // Более информативные сообщения об ошибках
+    console.error('[parse] error (outer)', {
+      name: error?.name,
+      message: error?.message,
+      stack: error?.stack,
+    })
     if (error.message?.includes('Invalid URL')) {
       return NextResponse.json(
         { error: 'Некорректный формат URL' },
