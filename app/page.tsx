@@ -26,7 +26,9 @@ export default function Home() {
 
     try {
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 120000) // Увеличиваем таймаут для перевода
+      // Увеличиваем таймаут для перевода (120 секунд = 2 минуты)
+      const timeoutMs = action === 'Перевести статью' ? 120000 : 60000
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
       // Сначала парсим статью
       log('fetch:before', { endpoint: '/api/parse' })
@@ -97,7 +99,11 @@ export default function Home() {
 
       let errorMessage = 'Произошла ошибка'
       if (error.name === 'AbortError') {
-        errorMessage = 'Превышено время ожидания. Попробуйте еще раз или используйте другой URL.'
+        if (action === 'Перевести статью') {
+          errorMessage = 'Превышено время ожидания перевода. Статья слишком большая или модель работает медленно. Попробуйте сократить текст или повторить попытку.'
+        } else {
+          errorMessage = 'Превышено время ожидания. Попробуйте еще раз или используйте другой URL.'
+        }
       } else if (error.message) {
         errorMessage = error.message
       } else if (error instanceof TypeError && error.message?.includes('fetch')) {
